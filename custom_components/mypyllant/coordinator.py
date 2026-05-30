@@ -375,12 +375,12 @@ class DailyDataCoordinator(MyPyllantCoordinator):
                     for da_index, dd in enumerate(device.data):
                         sensor_id = f"{DOMAIN}_{device.system_id}_{device.device_uuid}_{da_index}_{de_index}"
                         entity = await self.resolve_entry(sensor_id)
+                        # Worst case scenario, update only in given range
+                        device.data[da_index].data_from = device_update_start
+                        device.data[da_index].data_to = device_update_end
                         if entity is None:
                             # There is no entity with this id, its unusual, warn
                             _LOGGER.warning("Could not resolve entity %s", sensor_id)
-                            # Fallback on worst case scenario and fetch only today
-                            device.data[da_index].data_from = device_update_start
-                            device.data[da_index].data_to = device_update_end
                         elif entity.disabled:
                             # Entity is disabled, skip its update
                             device.data[da_index].skip_data_update = True
