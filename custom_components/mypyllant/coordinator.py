@@ -350,6 +350,7 @@ class DailyDataCoordinator(MyPyllantCoordinator):
         return False
 
     async def _async_update_data(self) -> dict[str, SystemWithDeviceData]:
+        _LOGGER.warning("Trying patched version")
         self._raise_if_quota_hit()
         _LOGGER.debug("Starting async update data for DailyDataCoordinator")
         try:
