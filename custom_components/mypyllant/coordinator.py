@@ -338,16 +338,14 @@ class SystemWithDeviceData(TypedDict):
 class DailyDataCoordinator(MyPyllantCoordinator):
     data: dict[str, SystemWithDeviceData]
 
-    async def is_sensor_disabled(self, unique_id: str) -> bool:
-        """
-        Check if a sensor is disabled to be able to skip its API update
-        """
+    async def resolve_entry(self, unique_id: str) -> er.RegistryEntry | None:
+        """Resolve a unique id to its entity."""
         entity_registry = er.async_get(self.hass)
         entity_id = entity_registry.async_get_entity_id("sensor", DOMAIN, unique_id)
-        if entity_id:
-            entity_entry = entity_registry.async_get(entity_id)
-            return entity_entry and entity_entry.disabled
-        return False
+        # Entity cannot be resolved, it never been modified
+        if entity_id is None:
+            return None
+        return entity_registry.async_get(entity_id)
 
     async def _async_update_data(self) -> dict[str, SystemWithDeviceData]:
         _LOGGER.warning("Trying patched version")
@@ -362,13 +360,6 @@ class DailyDataCoordinator(MyPyllantCoordinator):
             ):
                 raise UpdateFailed("No systems available for daily data fetch")
             for system in self.hass_data["system_coordinator"].data:
-                start = dt.now(system.timezone).replace(
-                    microsecond=0, second=0, minute=0, hour=0
-                )
-                end = start + timedelta(days=1)
-                _LOGGER.debug(
-                    "Getting daily data for %s from %s to %s", system.id, start, end
-                )
                 if len(system.devices) == 0:
                     _LOGGER.debug("No devices in %s", system.id)
                     continue
@@ -377,12 +368,42 @@ class DailyDataCoordinator(MyPyllantCoordinator):
                     "devices_data": [],
                 }
                 for de_index, device in enumerate(system.devices):
+                    device_update_end = dt.now(system.timezone)
+                    device_update_start = dt.now(system.timezone).replace(
+                        hour=0, minute=0, second=0
+                    )
                     for da_index, dd in enumerate(device.data):
                         sensor_id = f"{DOMAIN}_{device.system_id}_{device.device_uuid}_{da_index}_{de_index}"
-                        if await self.is_sensor_disabled(sensor_id):
+                        entity = await self.resolve_entry(sensor_id)
+                        if entity is None:
+                            # There is no entity with this id, its unusual, warn
+                            _LOGGER.warning("Could not resolve entity %s", sensor_id)
+                        elif entity.disabled:
+                            # Entity is disabled, skip its update
                             device.data[da_index].skip_data_update = True
+                        elif entity.modified_at is not None:
+                            potential_starts = [
+                                # Worst case scenario, today first time
+                                device_update_start,
+                                # Maybe entity has been created today but not modified yed
+                                entity.created_at,
+                                # Device has been modified today, it is the earliest boundary
+                                entity.modified_at,
+                            ]
+                            # Filter out any None start boundary
+                            entity_last_modified = max(
+                                [
+                                    start
+                                    for start in potential_starts
+                                    if start is not None
+                                ]
+                            )
+                            # Set boundaries in data provided to api call
+                            device.data[da_index].data_from = entity_last_modified
+                            device.data[da_index].data_to = device_update_end
+                    # Poll data for each sensor's device
                     device_data = self.api.get_data_by_device(
-                        device, DeviceDataBucketResolution.HOUR, start, end
+                        device, DeviceDataBucketResolution.HOUR
                     )
                     data[system.id]["devices_data"].append(
                         [da async for da in device_data]
