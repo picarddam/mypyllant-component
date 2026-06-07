@@ -1,9 +1,12 @@
 import pytest as pytest
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch, MagicMock
 from homeassistant.helpers.entity_registry import DATA_REGISTRY, EntityRegistry
+from homeassistant.helpers.recorder import DATA_INSTANCE
 from homeassistant.loader import DATA_COMPONENTS, DATA_INTEGRATIONS
 
 from myPyllant.api import MyPyllantAPI
-from myPyllant.models import DeviceData
+from myPyllant.models import DeviceData, DeviceDataBucket
 from myPyllant.enums import CircuitState
 from myPyllant.tests.generate_test_data import DATA_DIR
 from myPyllant.tests.utils import list_test_data, load_test_data
@@ -290,3 +293,173 @@ async def test_additional_system_sensors(
             float,
         )
         await mocked_api.aiohttp_session.close()
+
+
+@pytest.mark.parametrize("test_data", list_test_data())
+async def test_push_external_statistics(
+    hass,
+    mypyllant_aioresponses,
+    mocked_api: MyPyllantAPI,
+    daily_data_coordinator_mock,
+    test_data,
+):
+    """Test that _push_external_statistics is called with correct metadata and data."""
+    with mypyllant_aioresponses(test_data) as _:
+        system_coordinator = daily_data_coordinator_mock.hass_data["system_coordinator"]
+        system_coordinator.data = await system_coordinator._async_update_data()
+        daily_data_coordinator_mock.data = (
+            await daily_data_coordinator_mock._async_update_data()
+        )
+        system_id = next(iter(daily_data_coordinator_mock.data), None)
+        if system_id is None or not daily_data_coordinator_mock.data[system_id]:
+            await mocked_api.aiohttp_session.close()
+            pytest.skip(f"No devices in system {system_id}, skipping recorder tests")
+
+        assert system_id is not None  # Help type checker after pytest.skip
+
+        # Set up recorder instance marker
+        daily_data_coordinator_mock.hass.data[DATA_INSTANCE] = MagicMock()
+
+        data_sensor = DataSensor(system_id, 0, 0, daily_data_coordinator_mock)
+        data_sensor.hass = daily_data_coordinator_mock.hass
+
+        with patch(
+            "custom_components.mypyllant.sensor.async_add_external_statistics"
+        ) as mock_add_stats:
+            data_sensor._push_external_statistics()
+
+            # Verify called once
+            assert mock_add_stats.call_count == 1
+
+            # Verify metadata
+            _, metadata, statistics = mock_add_stats.call_args[0]
+            assert metadata["source"] == DOMAIN
+            assert metadata["statistic_id"].startswith(f"{DOMAIN}:")
+            assert metadata["has_sum"] is True
+            assert len(statistics) > 0
+
+        await mocked_api.aiohttp_session.close()
+
+
+async def test_push_external_statistics_empty_data(hass):
+    """Test that empty device_data.data doesn't crash (regression for 70dd1ea)."""
+    sensor = DataSensor("system_0", 0, 0, MagicMock())
+    sensor.hass = hass
+    sensor.coordinator.data = {
+        "system_0": {
+            "home_name": "Test",
+            "devices_data": [[MagicMock(data=[], device=None)]]
+        }
+    }
+    # Should not raise — empty bucket list returns early
+    sensor._push_external_statistics()
+
+
+async def test_push_external_statistics_no_recorder(hass):
+    """Test that recorder-not-enabled guard prevents crash."""
+    hass.data = {}  # No DATA_INSTANCE key
+    sensor = DataSensor("system_0", 0, 0, MagicMock())
+    sensor.hass = hass
+    sensor.coordinator.data = {
+        "system_0": {
+            "home_name": "Test",
+            "devices_data": [[MagicMock(data=[
+                DeviceDataBucket(
+                    start_date=datetime(2026, 6, 6, 0, 0, tzinfo=timezone.utc),
+                    end_date=datetime(2026, 6, 6, 1, 0, tzinfo=timezone.utc),
+                    value=1000.0,
+                )
+            ])]]
+        }
+    }
+    # Should not raise — recorder guard returns early
+    sensor._push_external_statistics()
+
+
+async def test_push_external_statistics_none_device(hass):
+    """Test that None device (and thus None unique_id) is handled gracefully."""
+    sensor = DataSensor("system_0", 0, 0, MagicMock())
+    sensor.hass = hass
+    sensor.coordinator.data = {
+        "system_0": {
+            "home_name": "Test",
+            "devices_data": [[MagicMock(data=[], device=None)]]
+        }
+    }
+    # Should not raise — device_data returns DeviceData with device=None,
+    # unique_id returns None when device is None
+    sensor._push_external_statistics()
+
+
+async def test_push_external_statistics_running_sum_reset(hass):
+    """Test that running sum resets at midnight."""
+    tz = timezone(timedelta(hours=2))  # Europe/Berlin-like
+    buckets = [
+        # Day 1, hour 23
+        DeviceDataBucket(
+            start_date=datetime(2026, 6, 6, 23, 0, tzinfo=tz),
+            end_date=datetime(2026, 6, 7, 0, 0, tzinfo=tz),
+            value=500.0,
+        ),
+        # Day 2, hour 0 (new day — sum should reset)
+        DeviceDataBucket(
+            start_date=datetime(2026, 6, 7, 0, 0, tzinfo=tz),
+            end_date=datetime(2026, 6, 7, 1, 0, tzinfo=tz),
+            value=300.0,
+        ),
+        # Day 2, hour 1
+        DeviceDataBucket(
+            start_date=datetime(2026, 6, 7, 1, 0, tzinfo=tz),
+            end_date=datetime(2026, 6, 7, 2, 0, tzinfo=tz),
+            value=200.0,
+        ),
+    ]
+
+    device_data = MagicMock(spec=DeviceData)
+    device_data.operation_mode = "heating"
+    device_data.energy_type = "consumed_electrical_energy"
+    device_data.data = buckets
+    # Create a mock device for unique_id
+    mock_device = MagicMock()
+    mock_device.device_uuid = "test_uuid_123"
+    mock_device.system_id = "system_0"
+    device_data.device = mock_device
+
+    hass_mock = MagicMock()
+    hass_mock.data = {DATA_INSTANCE: MagicMock()}
+
+    coordinator = MagicMock()
+    coordinator.data = {
+        "system_0": {
+            "home_name": "Test",
+            "devices_data": [[device_data]]
+        }
+    }
+
+    sensor = DataSensor("system_0", 0, 0, coordinator)
+    sensor.hass = hass_mock
+
+    with patch(
+        "custom_components.mypyllant.sensor.async_add_external_statistics"
+    ) as mock_add_stats:
+        sensor._push_external_statistics()
+
+        _, metadata, statistics = mock_add_stats.call_args[0]
+
+        # 3 statistics pushed
+        assert len(statistics) == 3
+
+        # First bucket (day 1, hour 23): sum = 500
+        assert statistics[0]["sum"] == 500.0
+
+        # Second bucket (day 2, hour 0): sum resets to 300
+        assert statistics[1]["sum"] == 300.0
+
+        # Third bucket (day 2, hour 1): sum = 300 + 200 = 500
+        assert statistics[2]["sum"] == 500.0
+
+        # last_reset changes between bucket 0 and bucket 1
+        assert statistics[0]["last_reset"] != statistics[1]["last_reset"]
+
+        # last_reset is same for bucket 1 and 2 (same day)
+        assert statistics[1]["last_reset"] == statistics[2]["last_reset"]

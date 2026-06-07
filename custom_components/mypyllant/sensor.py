@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -19,6 +20,13 @@ from homeassistant.const import (
     UnitOfPower,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.components.recorder.models import (
+    StatisticData,
+    StatisticMetaData,
+    StatisticMeanType,
+)
+from homeassistant.components.recorder.statistics import async_add_external_statistics
+from homeassistant.helpers.recorder import DATA_INSTANCE
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -908,6 +916,83 @@ class DataSensor(CoordinatorEntity, SensorEntity):
             return None
 
     @callback
+    def _push_external_statistics(self) -> None:
+        """Push hourly energy buckets to the recorder's statistics tables."""
+        # Guard: recorder not enabled
+        if DATA_INSTANCE not in self.hass.data:
+            return
+
+        if self.device_data is None:
+            return
+
+        unique_id = self.unique_id
+        if unique_id is None:
+            return
+
+        buckets = self.device_data.data
+        if not buckets:
+            return
+
+        # Build statistic_id from unique_id: "mypyllant:object_id" (lowercase)
+        # unique_id is "mypyllant_{system_id}_{uuid}_{da_index}_{de_index}"
+        statistic_id = unique_id.replace("_", ":", 1).lower()
+
+        metadata: StatisticMetaData = {
+            "mean_type": StatisticMeanType.NONE,
+            "has_sum": True,
+            "name": self.name,
+            "source": DOMAIN,  # "mypyllant" — matches domain in statistic_id
+            "statistic_id": statistic_id,
+            "unit_of_measurement": self.native_unit_of_measurement,
+            "unit_class": "energy",
+        }
+
+        # Build StatisticData rows with daily-resetting running sum
+        statistics: list[StatisticData] = []
+        running_sum = 0.0
+        last_reset: datetime | None = None
+
+        for bucket in buckets:
+            # Skip buckets with no value
+            if bucket.value is None:
+                continue
+
+            # Normalize start to top-of-hour (required by recorder)
+            start = bucket.start_date.replace(minute=0, second=0, microsecond=0)
+
+            # Compute last_reset as start of day in the bucket's timezone
+            bucket_last_reset = start.replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+
+            # If this is a new day, reset the running sum
+            if last_reset is None or bucket_last_reset != last_reset:
+                last_reset = bucket_last_reset
+                running_sum = 0.0
+
+            running_sum += bucket.value
+
+            stat_data: StatisticData = {
+                "start": start,
+                "state": bucket.value,
+                "sum": running_sum,
+                "last_reset": last_reset,
+            }
+            statistics.append(stat_data)
+
+        if not statistics:
+            return
+
+        _LOGGER.debug(
+            "Pushing %d hourly statistics for %s (statistic_id=%s)",
+            len(statistics),
+            unique_id,
+            statistic_id,
+        )
+
+        async_add_external_statistics(self.hass, metadata, statistics)
+
+    @callback
     def _handle_coordinator_update(self) -> None:
         super()._handle_coordinator_update()
         _LOGGER.debug(
@@ -917,6 +1002,7 @@ class DataSensor(CoordinatorEntity, SensorEntity):
             self.last_reset,
             self.device_data.data if self.device_data is not None else None,
         )
+        self._push_external_statistics()
 
 
 class EfficiencySensor(CoordinatorEntity, SensorEntity):

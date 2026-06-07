@@ -348,7 +348,6 @@ class DailyDataCoordinator(MyPyllantCoordinator):
         return entity_registry.async_get(entity_id)
 
     async def _async_update_data(self) -> dict[str, SystemWithDeviceData]:
-        _LOGGER.warning("Trying patched version")
         self._raise_if_quota_hit()
         _LOGGER.debug("Starting async update data for DailyDataCoordinator")
         try:
@@ -359,6 +358,11 @@ class DailyDataCoordinator(MyPyllantCoordinator):
                 or not self.hass_data["system_coordinator"].data
             ):
                 raise UpdateFailed("No systems available for daily data fetch")
+
+            # Initialize last-poll tracking dict
+            if "daily_data_last_poll" not in self.hass_data:
+                self.hass_data["daily_data_last_poll"] = {}
+
             for system in self.hass_data["system_coordinator"].data:
                 if len(system.devices) == 0:
                     _LOGGER.debug("No devices in %s", system.id)
@@ -384,26 +388,17 @@ class DailyDataCoordinator(MyPyllantCoordinator):
                         elif entity.disabled:
                             # Entity is disabled, skip its update
                             dd.skip_data_update = True
-                        elif entity.modified_at is not None:
-                            potential_starts = [
-                                # Worst case scenario, today first time
-                                device_update_start,
-                                # Maybe entity has been created today but not modified yed
-                                entity.created_at,
-                                # Device has been modified today, it is the earliest boundary
-                                entity.modified_at,
-                            ]
-                            # Filter out any None start boundary
-                            entity_last_modified = max(
-                                [
-                                    start
-                                    for start in potential_starts
-                                    if start is not None
-                                ]
-                            )
-                            # Set boundaries in data provided to api call
-                            dd.data_from = entity_last_modified
-                            dd.data_to = device_update_end
+                        else:
+                            # Use last-poll timestamp if available, otherwise use entity.created_at
+                            # Convert device_update_start to UTC for consistent comparison
+                            device_update_start_utc = device_update_start.astimezone(timezone.utc)
+                            last_poll = self.hass_data["daily_data_last_poll"].get(sensor_id)
+                            if last_poll is not None:
+                                # Fetch only data since last successful poll
+                                dd.data_from = max(last_poll, device_update_start_utc)
+                            elif entity.created_at is not None:
+                                dd.data_from = max(entity.created_at, device_update_start_utc)
+                            # else: keep default device_update_start (worst case)
                     # Poll data for each sensor's device
                     device_data = self.api.get_data_by_device(
                         device, DeviceDataBucketResolution.HOUR
@@ -411,6 +406,21 @@ class DailyDataCoordinator(MyPyllantCoordinator):
                     data[system.id]["devices_data"].append(
                         [da async for da in device_data]
                     )
+
+            # Update last-poll timestamps for successfully fetched data
+            now_utc = dt.now(timezone.utc)
+            for system in self.hass_data["system_coordinator"].data:
+                if system.id not in data:
+                    continue
+                system_data = data[system.id]
+                for de_index, device in enumerate(system.devices):
+                    if de_index >= len(system_data["devices_data"]):
+                        continue
+                    devices_data = system_data["devices_data"][de_index]
+                    for da_index in range(len(devices_data)):
+                        sensor_id = f"{DOMAIN}_{system.id}_{device.device_uuid}_{da_index}_{de_index}"
+                        self.hass_data["daily_data_last_poll"][sensor_id] = now_utc
+
             # Clear quota state on successful fetch so future updates aren't blocked
             self._clear_quota_state()
             return data
