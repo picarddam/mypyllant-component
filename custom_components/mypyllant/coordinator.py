@@ -373,14 +373,20 @@ class DailyDataCoordinator(MyPyllantCoordinator):
                 }
                 for de_index, device in enumerate(system.devices):
                     device_update_end = dt.now(system.timezone)
-                    device_update_start = dt.now(system.timezone).replace(
-                        hour=0, minute=0, second=0
-                    )
+                    # Default floor: last polling interval (not midnight) to limit quota usage
+                    interval = self.update_interval
+                    if interval is None:
+                        system_coord = self.hass_data.get("system_coordinator")
+                        interval = getattr(system_coord, "update_interval", None)
+                    if interval is None:
+                        interval = timedelta(hours=4)
+                    now_utc = dt.now(timezone.utc)
+                    earliest_boundary = now_utc - interval
                     for da_index, dd in enumerate(device.data):
                         sensor_id = f"{DOMAIN}_{device.system_id}_{device.device_uuid}_{da_index}_{de_index}"
                         entity = await self.resolve_entry(sensor_id)
-                        # Worst case scenario, update only in given range
-                        dd.data_from = device_update_start
+                        # Worst case scenario, update only the last interval
+                        dd.data_from = earliest_boundary
                         dd.data_to = device_update_end
                         if entity is None:
                             # There is no entity with this id, its unusual, warn
@@ -389,16 +395,15 @@ class DailyDataCoordinator(MyPyllantCoordinator):
                             # Entity is disabled, skip its update
                             dd.skip_data_update = True
                         else:
-                            # Use last-poll timestamp if available, otherwise use entity.created_at
-                            # Convert device_update_start to UTC for consistent comparison
-                            device_update_start_utc = device_update_start.astimezone(timezone.utc)
-                            last_poll = self.hass_data["daily_data_last_poll"].get(sensor_id)
+                            last_poll = self.hass_data["daily_data_last_poll"].get(
+                                sensor_id
+                            )
                             if last_poll is not None:
                                 # Fetch only data since last successful poll
-                                dd.data_from = max(last_poll, device_update_start_utc)
+                                dd.data_from = max(last_poll, earliest_boundary)
                             elif entity.created_at is not None:
-                                dd.data_from = max(entity.created_at, device_update_start_utc)
-                            # else: keep default device_update_start (worst case)
+                                dd.data_from = max(entity.created_at, earliest_boundary)
+                            # else: keep default earliest_boundary (worst case)
                     # Poll data for each sensor's device
                     device_data = self.api.get_data_by_device(
                         device, DeviceDataBucketResolution.HOUR
