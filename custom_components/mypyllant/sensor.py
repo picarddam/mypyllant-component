@@ -836,6 +836,7 @@ class DataSensor(CoordinatorEntity, SensorEntity):
         self.de_index = de_index
         self._attr_native_unit_of_measurement = UnitOfEnergy.WATT_HOUR
         self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
         _LOGGER.debug(
             "Finishing init of %s = %s and unique id %s",
             self.name,
