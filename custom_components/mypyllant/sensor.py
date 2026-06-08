@@ -820,8 +820,9 @@ class DomesticHotWaterCurrentSpecialFunctionSensor(
 
 class DataSensor(CoordinatorEntity, SensorEntity):
     coordinator: DailyDataCoordinator
-    # No state_class — recorder auto-tracking is disabled.
-    # Energy Dashboard data comes exclusively from _push_external_statistics().
+    _attr_native_unit_of_measurement = UnitOfEnergy.WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
 
     def __init__(
         self,
