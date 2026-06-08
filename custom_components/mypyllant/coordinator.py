@@ -389,6 +389,10 @@ class DailyDataCoordinator(MyPyllantCoordinator):
                     if interval is None:
                         interval = timedelta(hours=4)
                     earliest_boundary = now_utc.astimezone(tz) - interval
+                    # If device EMF data is stale, shift the window back so
+                    # data_from stays before data_to (chronological order).
+                    if earliest_boundary > device_update_end:
+                        earliest_boundary = device_update_end - interval
                     for da_index, dd in enumerate(device.data):
                         sensor_id = f"{DOMAIN}_{device.system_id}_{device.device_uuid}_{da_index}_{de_index}"
                         entity = await self.resolve_entry(sensor_id)
