@@ -820,7 +820,8 @@ class DomesticHotWaterCurrentSpecialFunctionSensor(
 
 class DataSensor(CoordinatorEntity, SensorEntity):
     coordinator: DailyDataCoordinator
-    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    # No state_class — recorder auto-tracking is disabled.
+    # Energy Dashboard data comes exclusively from _push_external_statistics().
 
     def __init__(
         self,
@@ -911,27 +912,76 @@ class DataSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self):
-        if self.device_data:
-            return self.device_data.total_consumption_rounded
-        else:
+        """Return today's accumulated energy derived from hourly buckets.
+
+        Not pushed to the recorder — the sensor state is computed from the
+        coordinator's bucket data so we don't rely on the API's lifetime
+        total_consumption (which changes with each query window).
+        """
+        if self.device_data is None:
             return None
+        buckets = self.device_data.data
+        if not buckets:
+            return None
+
+        # Determine "today" from the first bucket's timezone
+        first_bucket = buckets[0]
+        if first_bucket.start_date is None or first_bucket.start_date.tzinfo is None:
+            return None
+
+        tz = first_bucket.start_date.tzinfo
+        today_start = datetime.now(tz).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+
+        # Sum all buckets that belong to today
+        total = 0.0
+        for bucket in buckets:
+            if bucket.value is not None and bucket.start_date is not None:
+                if bucket.start_date >= today_start:
+                    total += bucket.value
+
+        return round(total, 1) if total > 0 else 0.0
 
     @callback
     def _push_external_statistics(self) -> None:
         """Push hourly energy buckets to the recorder's statistics tables."""
         # Guard: recorder not enabled
         if DATA_INSTANCE not in self.hass.data:
+            _LOGGER.warning(
+                "[DIAG] Recorder not ready (DATA_INSTANCE missing), skipping external stats for %s",
+                self.unique_id,
+            )
             return
 
         if self.device_data is None:
+            _LOGGER.warning(
+                "[DIAG] device_data is None for %s (system_id=%s, da_index=%s, de_index=%s)",
+                self.unique_id,
+                self.system_id,
+                self.da_index,
+                self.de_index,
+            )
             return
 
         unique_id = self.unique_id
         if unique_id is None:
+            _LOGGER.warning(
+                "[DIAG] unique_id is None for %s (device=%s)",
+                self.unique_id,
+                self.device,
+            )
             return
 
         buckets = self.device_data.data
         if not buckets:
+            _LOGGER.warning(
+                "[DIAG] Empty buckets for %s (device_data=%s, data=%s, skip_data_update=%s)",
+                unique_id,
+                self.device_data,
+                self.device_data.data,
+                getattr(self.device_data, "skip_data_update", None),
+            )
             return
 
         # Build statistic_id: "mypyllant:object_id" (lowercase)
