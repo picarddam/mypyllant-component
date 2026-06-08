@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
@@ -933,9 +934,25 @@ class DataSensor(CoordinatorEntity, SensorEntity):
         if not buckets:
             return
 
-        # Build statistic_id from unique_id: "mypyllant:object_id" (lowercase)
-        # unique_id is "mypyllant_{system_id}_{uuid}_{da_index}_{de_index}"
-        statistic_id = unique_id.replace("_", ":", 1).lower()
+        # Build statistic_id: "mypyllant:object_id" (lowercase)
+        # Sanitize each component individually to guarantee a valid format.
+        # HA regex: ^(?!.+__)(?!_)[\da-z_]+(?<!_):(?!_)[\da-z_]+(?<!_)$
+        def _sanitize_id_part(part: str) -> str:
+            sanitized = re.sub(r"[^a-z0-9]", "_", part.lower())
+            sanitized = re.sub(r"__+", "_", sanitized)
+            return sanitized.strip("_")
+
+        object_id = "_".join(
+            _sanitize_id_part(p)
+            for p in [
+                self.system_id,
+                self.device.device_uuid,
+                str(self.da_index),
+                str(self.de_index),
+            ]
+            if p
+        )
+        statistic_id = f"{DOMAIN}:{object_id}"
 
         metadata: StatisticMetaData = {
             "mean_type": StatisticMeanType.NONE,
@@ -961,9 +978,7 @@ class DataSensor(CoordinatorEntity, SensorEntity):
             start = bucket.start_date.replace(minute=0, second=0, microsecond=0)
 
             # Compute last_reset as start of day in the bucket's timezone
-            bucket_last_reset = start.replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
+            bucket_last_reset = start.replace(hour=0, minute=0, second=0, microsecond=0)
 
             # If this is a new day, reset the running sum
             if last_reset is None or bucket_last_reset != last_reset:
