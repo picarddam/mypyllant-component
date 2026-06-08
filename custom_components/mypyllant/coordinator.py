@@ -372,7 +372,8 @@ class DailyDataCoordinator(MyPyllantCoordinator):
                     "devices_data": [],
                 }
                 for de_index, device in enumerate(system.devices):
-                    device_update_end = dt.now(system.timezone)
+                    tz = system.timezone
+                    device_update_end = dt.now(tz)
                     # Default floor: last polling interval (not midnight) to limit quota usage
                     interval = self.update_interval
                     if interval is None:
@@ -381,7 +382,7 @@ class DailyDataCoordinator(MyPyllantCoordinator):
                     if interval is None:
                         interval = timedelta(hours=4)
                     now_utc = dt.now(timezone.utc)
-                    earliest_boundary = now_utc - interval
+                    earliest_boundary = now_utc.astimezone(tz) - interval
                     for da_index, dd in enumerate(device.data):
                         sensor_id = f"{DOMAIN}_{device.system_id}_{device.device_uuid}_{da_index}_{de_index}"
                         entity = await self.resolve_entry(sensor_id)
@@ -400,9 +401,11 @@ class DailyDataCoordinator(MyPyllantCoordinator):
                             )
                             if last_poll is not None:
                                 # Fetch only data since last successful poll
-                                dd.data_from = max(last_poll, earliest_boundary)
+                                last_poll_local = last_poll.astimezone(tz) if last_poll.tzinfo else last_poll
+                                dd.data_from = max(last_poll_local, earliest_boundary)
                             elif entity.created_at is not None:
-                                dd.data_from = max(entity.created_at, earliest_boundary)
+                                created_at_local = entity.created_at.astimezone(tz) if entity.created_at.tzinfo else entity.created_at
+                                dd.data_from = max(created_at_local, earliest_boundary)
                             # else: keep default earliest_boundary (worst case)
                     # Poll data for each sensor's device
                     device_data = self.api.get_data_by_device(
