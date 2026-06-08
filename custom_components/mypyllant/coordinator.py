@@ -376,7 +376,11 @@ class DailyDataCoordinator(MyPyllantCoordinator):
                     now_utc = dt.now(timezone.utc)
                     # Use the device's last known EMF data timestamp as the upper bound,
                     # so we don't query for data that doesn't exist yet.
-                    device_update_end = device.last_data.astimezone(tz) if device.last_data else dt.now(tz)
+                    device_update_end = (
+                        device.last_data.astimezone(tz)
+                        if device.last_data
+                        else dt.now(tz)
+                    )
                     # Default floor: last polling interval (not midnight) to limit quota usage
                     interval = self.update_interval
                     if interval is None:
